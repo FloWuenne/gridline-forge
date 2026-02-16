@@ -1,0 +1,33 @@
+[package]
+name = "gridline-forge"
+version = "0.1.0"
+edition = "2021"
+authors = ["GridlineForge Contributors"]
+description = "High-performance grid line removal and inpainting for panorama images"
+license = "MIT"
+repository = "https://github.com/FloWuenne/gridline-forge"
+
+[[bin]]
+name = "gridline-forge"
+path = "src/main.rs"
+
+[[bin]]
+name = "generate_comparison"
+path = "tests/generate_comparison.rs"
+
+[dependencies]
+image = "0.25"
+ndarray = "0.16"
+rayon = "1.10"
+rustfft = "6.2"
+clap = { version = "4.5", features = ["derive"] }
+anyhow = "1.0"
+indicatif = "0.17"
+thiserror = "2.0"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "processing"
+harness = false

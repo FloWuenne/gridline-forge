@@ -1,0 +1,8 @@
+target/
+.git/
+.github/
+comparison_output/
+*.md
+!README.md
+.DS_Store
+.gitignore

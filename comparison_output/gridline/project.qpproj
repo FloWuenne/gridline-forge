@@ -1,0 +1,110 @@
+{
+  "version": "0.5.1",
+  "createTimestamp": 1771207365102,
+  "modifyTimestamp": 1771207365102,
+  "uri": "file:/Users/florian.wuennemann/1_Projects/2026_mindagap_rust/MindaGap/gridline-forge/comparison_output/gridline/project.qpproj",
+  "lastID": 4,
+  "images": [
+    {
+      "serverBuilder": {
+        "builderType": "uri",
+        "providerClassName": "qupath.lib.images.servers.bioformats.BioFormatsServerBuilder",
+        "uri": "file:/Users/florian.wuennemann/1_Projects/2026_mindagap_rust/MindaGap/gridline-forge/comparison_output/01_original_with_grid.tif",
+        "args": [
+          "--series",
+          "0"
+        ]
+      },
+      "entryID": 1,
+      "randomizedName": "a07a2144-8dec-45e3-b276-a94b4d47b0d9",
+      "imageName": "01_original_with_grid.tif",
+      "metadata": {}
+    },
+    {
+      "serverBuilder": {
+        "builderType": "uri",
+        "providerClassName": "qupath.lib.images.servers.bioformats.BioFormatsServerBuilder",
+        "uri": "file:/Users/florian.wuennemann/1_Projects/2026_mindagap_rust/MindaGap/gridline-forge/comparison_output/02_gridlineforge_output.tif",
+        "args": [
+          "--series",
+          "0"
+        ],
+        "metadata": {
+          "name": "02_gridlineforge_output.tif",
+          "width": 1000,
+          "height": 1000,
+          "sizeZ": 1,
+          "sizeT": 1,
+          "channelType": "DEFAULT",
+          "isRGB": false,
+          "pixelType": "UINT16",
+          "levels": [
+            {
+              "downsample": 1.0,
+              "width": 1000,
+              "height": 1000
+            }
+          ],
+          "channels": [
+            {
+              "name": "Channel 1",
+              "color": -1
+            }
+          ],
+          "pixelCalibration": {
+            "pixelWidth": {
+              "value": 1.0,
+              "unit": "µm"
+            },
+            "pixelHeight": {
+              "value": 1.0,
+              "unit": "µm"
+            },
+            "zSpacing": {
+              "value": 1.0,
+              "unit": "z-slice"
+            },
+            "timeUnit": "SECONDS",
+            "timepoints": []
+          },
+          "preferredTileWidth": 1000,
+          "preferredTileHeight": 500
+        }
+      },
+      "entryID": 2,
+      "randomizedName": "009b868d-a5b4-4cd4-a5bc-3ecc53adbf72",
+      "imageName": "02_gridlineforge_output.tif",
+      "metadata": {}
+    },
+    {
+      "serverBuilder": {
+        "builderType": "uri",
+        "providerClassName": "qupath.lib.images.servers.bioformats.BioFormatsServerBuilder",
+        "uri": "file:/Users/florian.wuennemann/1_Projects/2026_mindagap_rust/MindaGap/gridline-forge/comparison_output/03_mindagap_output.tif",
+        "args": [
+          "--series",
+          "0"
+        ]
+      },
+      "entryID": 3,
+      "randomizedName": "6fc4bb80-7315-4dc0-a5a0-9fe6f6de1f7c",
+      "imageName": "03_mindagap_output.tif",
+      "metadata": {}
+    },
+    {
+      "serverBuilder": {
+        "builderType": "uri",
+        "providerClassName": "qupath.lib.images.servers.bioformats.BioFormatsServerBuilder",
+        "uri": "file:/Users/florian.wuennemann/1_Projects/2026_mindagap_rust/MindaGap/gridline-forge/comparison_output/04_difference_amplified.tif",
+        "args": [
+          "--series",
+          "0"
+        ]
+      },
+      "entryID": 4,
+      "randomizedName": "f644c267-951e-4948-84bc-06761ecd0fb6",
+      "imageName": "04_difference_amplified.tif",
+      "metadata": {}
+    }
+  ]
+}
