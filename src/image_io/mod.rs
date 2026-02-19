@@ -1,13 +1,15 @@
 //! Multi-format image I/O with bit depth preservation
 
 use crate::types::{Error, ImageData, ImageFormat, Result};
-use image::{DynamicImage, ImageBuffer, Luma};
+use image::{DynamicImage, ImageBuffer, ImageReader, Luma};
 use ndarray::Array2;
 use std::path::Path;
 
 /// Load an image from a file, preserving bit depth
 pub fn load_image(path: &Path) -> Result<ImageData> {
-    let img = image::open(path)?;
+    let mut reader = ImageReader::open(path)?;
+    reader.no_limits();
+    let img = reader.decode()?;
 
     match img {
         DynamicImage::ImageLuma8(buf) => {
