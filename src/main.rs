@@ -24,8 +24,8 @@ struct Args {
     #[arg(short = 'k', long, default_value = "5")]
     kernel_size: usize,
 
-    /// Refinement iterations (default: 5)
-    #[arg(short = 'r', long, default_value = "5")]
+    /// Gaussian blur iterations (default: 40, matching MindaGap)
+    #[arg(short = 'r', long, default_value = "40")]
     refinement_rounds: usize,
 
     /// Manual X grid spacing (auto-detect if not set)
@@ -52,9 +52,6 @@ struct Args {
     #[arg(long)]
     benchmark: bool,
 
-    /// Fast marching radius (default: 3)
-    #[arg(long, default_value = "3")]
-    fmm_radius: usize,
 }
 
 fn main() -> Result<()> {
@@ -87,7 +84,6 @@ fn main() -> Result<()> {
     let config = ProcessingConfig {
         kernel_size: args.kernel_size,
         refinement_rounds: args.refinement_rounds,
-        fmm_radius: args.fmm_radius,
         show_progress: !args.quiet,
         benchmark: args.benchmark,
     };

@@ -1,15 +1,25 @@
 //! Gaussian blur refinement for grid regions
+//!
+//! Implements MindaGap's iterative Gaussian blur algorithm:
+//! 1. Initialize grid pixels to min non-zero value
+//! 2. Loop N times: blur entire image, copy back only grid pixels
+//!
+//! Uses separable convolution with OpenCV-matching sigma for performance.
 
 use crate::types::Result;
 use ndarray::{Array2, ArrayViewMut2};
 
-/// Refine grid regions using localized Gaussian blur
+/// Refine grid regions using MindaGap-style iterative Gaussian blur
+///
+/// Blurs the full image each iteration (matching MindaGap's cv2.GaussianBlur behavior),
+/// then copies blurred values back only to grid pixels.
 ///
 /// # Arguments
-/// * `image` - Mutable view of the image layer to refine
+/// * `image` - Mutable view of the image layer to refine (grid pixels should already be
+///   initialized to min_nonzero before calling)
 /// * `mask` - Boolean mask of grid pixels (true = grid)
-/// * `kernel_size` - Size of Gaussian kernel (must be odd)
-/// * `iterations` - Number of refinement iterations
+/// * `kernel_size` - Size of Gaussian kernel (must be odd, default 5)
+/// * `iterations` - Number of refinement iterations (default 40)
 pub fn refine_grid(
     mut image: ArrayViewMut2<u16>,
     mask: &Array2<bool>,
@@ -22,33 +32,96 @@ pub fn refine_grid(
         ));
     }
 
-    // Generate Gaussian kernel
-    let kernel = generate_gaussian_kernel_1d(kernel_size);
-
-    // Expand mask to include small margin around grid pixels
-    let expanded_mask = expand_mask(mask, 2);
-
-    // Create work buffer for separable convolution
     let (height, width) = (image.nrows(), image.ncols());
-    let mut temp_buffer = Array2::zeros((height, width));
+    let kernel = generate_gaussian_kernel_1d(kernel_size);
+    let half_k = kernel_size / 2;
 
-    // Iterative refinement
+    // Build flat mask for fast indexing
+    let flat_mask: Vec<bool> = (0..height)
+        .flat_map(|y| (0..width).map(move |x| mask[(y, x)]))
+        .collect();
+
+    // Work buffer: copy image as f32
+    let mut work: Vec<f32> = Vec::with_capacity(height * width);
+    for y in 0..height {
+        for x in 0..width {
+            work.push(image[(y, x)] as f32);
+        }
+    }
+
+    // Temp buffer for horizontal pass results
+    let mut temp: Vec<f32> = vec![0.0; height * width];
+
     for _ in 0..iterations {
-        // Apply separable Gaussian blur
+        // Horizontal pass: blur work -> temp (all pixels)
+        for y in 0..height {
+            let row_offset = y * width;
+            for x in 0..width {
+                let mut sum = 0.0f32;
+                for (i, &k_val) in kernel.iter().enumerate() {
+                    let sx = (x as isize + i as isize - half_k as isize)
+                        .max(0)
+                        .min(width as isize - 1) as usize;
+                    sum += work[row_offset + sx] * k_val;
+                }
+                temp[row_offset + x] = sum;
+            }
+        }
 
-        // Horizontal pass
-        apply_horizontal_blur(&image.view(), &mut temp_buffer.view_mut(), &kernel, &expanded_mask);
+        // Vertical pass: blur temp -> write to work, but only grid pixels
+        // Non-grid pixels in work stay unchanged (they are the original image values)
+        for y in 0..height {
+            let row_offset = y * width;
+            for x in 0..width {
+                if !flat_mask[row_offset + x] {
+                    continue;
+                }
 
-        // Vertical pass (back to image, but only update grid pixels)
-        apply_vertical_blur(&temp_buffer.view(), &mut image, &kernel, mask);
+                let mut sum = 0.0f32;
+                for (i, &k_val) in kernel.iter().enumerate() {
+                    let sy = (y as isize + i as isize - half_k as isize)
+                        .max(0)
+                        .min(height as isize - 1) as usize;
+                    sum += temp[sy * width + x] * k_val;
+                }
+                // Round to integer each iteration to match MindaGap's uint16 behavior
+                // (cv2.GaussianBlur on uint16 returns uint16, so rounding happens each iteration)
+                work[row_offset + x] = sum.round();
+            }
+        }
+    }
+
+    // Copy results back to image (grid pixels only)
+    for y in 0..height {
+        let row_offset = y * width;
+        for x in 0..width {
+            if flat_mask[row_offset + x] {
+                image[(y, x)] = work[row_offset + x].round() as u16;
+            }
+        }
     }
 
     Ok(())
 }
 
-/// Generate 1D Gaussian kernel
+/// Generate 1D Gaussian kernel matching OpenCV's getGaussianKernel behavior
+///
+/// For ksize <= 7 with sigma=0, OpenCV uses fixed binomial kernels (bit-exact).
+/// For larger sizes, it computes Gaussian with auto-sigma:
+///   sigma = 0.3 * ((ksize-1)*0.5 - 1) + 0.8
 fn generate_gaussian_kernel_1d(size: usize) -> Vec<f32> {
-    let sigma = (size as f32) / 6.0; // Standard rule: kernel_size ≈ 6σ
+    // Match OpenCV's fixed kernels for small sizes (getGaussianKernelBitExact)
+    // These are binomial approximation kernels used when sigma <= 0
+    match size {
+        1 => return vec![1.0],
+        3 => return vec![0.25, 0.5, 0.25],
+        5 => return vec![0.0625, 0.25, 0.375, 0.25, 0.0625],
+        7 => return vec![0.03125, 0.109375, 0.21875, 0.28125, 0.21875, 0.109375, 0.03125],
+        _ => {}
+    }
+
+    // For larger sizes, compute Gaussian with OpenCV's auto-sigma
+    let sigma = 0.3 * ((size as f32 - 1.0) * 0.5 - 1.0) + 0.8;
     let center = (size / 2) as f32;
     let mut kernel = Vec::with_capacity(size);
     let mut sum = 0.0;
@@ -60,7 +133,6 @@ fn generate_gaussian_kernel_1d(size: usize) -> Vec<f32> {
         sum += value;
     }
 
-    // Normalize kernel
     for k in &mut kernel {
         *k /= sum;
     }
@@ -69,6 +141,7 @@ fn generate_gaussian_kernel_1d(size: usize) -> Vec<f32> {
 }
 
 /// Expand mask by dilating it (add margin around grid pixels)
+#[allow(dead_code)]
 fn expand_mask(mask: &Array2<bool>, margin: usize) -> Array2<bool> {
     let (height, width) = (mask.nrows(), mask.ncols());
     let mut expanded = Array2::from_elem((height, width), false);
@@ -76,7 +149,6 @@ fn expand_mask(mask: &Array2<bool>, margin: usize) -> Array2<bool> {
     for y in 0..height {
         for x in 0..width {
             if mask[(y, x)] {
-                // Set pixel and surrounding margin
                 let y_start = y.saturating_sub(margin);
                 let y_end = (y + margin + 1).min(height);
                 let x_start = x.saturating_sub(margin);
@@ -92,81 +164,6 @@ fn expand_mask(mask: &Array2<bool>, margin: usize) -> Array2<bool> {
     }
 
     expanded
-}
-
-/// Apply horizontal Gaussian blur (only to expanded mask region)
-fn apply_horizontal_blur(
-    input: &ndarray::ArrayView2<u16>,
-    output: &mut ArrayViewMut2<u16>,
-    kernel: &[f32],
-    mask: &Array2<bool>,
-) {
-    let (height, width) = (input.nrows(), input.ncols());
-    let half_kernel = kernel.len() / 2;
-
-    for y in 0..height {
-        for x in 0..width {
-            // Only process pixels in expanded mask
-            if !mask[(y, x)] {
-                output[(y, x)] = input[(y, x)];
-                continue;
-            }
-
-            let mut sum = 0.0;
-            let mut weight_sum = 0.0;
-
-            for (i, &k_val) in kernel.iter().enumerate() {
-                let offset = i as isize - half_kernel as isize;
-                let nx = (x as isize + offset).max(0).min(width as isize - 1) as usize;
-
-                sum += input[(y, nx)] as f32 * k_val;
-                weight_sum += k_val;
-            }
-
-            output[(y, x)] = if weight_sum > 0.0 {
-                (sum / weight_sum).round() as u16
-            } else {
-                input[(y, x)]
-            };
-        }
-    }
-}
-
-/// Apply vertical Gaussian blur (only update grid mask pixels in output)
-fn apply_vertical_blur(
-    input: &ndarray::ArrayView2<u16>,
-    output: &mut ArrayViewMut2<u16>,
-    kernel: &[f32],
-    mask: &Array2<bool>,
-) {
-    let (height, width) = (input.nrows(), input.ncols());
-    let half_kernel = kernel.len() / 2;
-
-    for y in 0..height {
-        for x in 0..width {
-            // Only update grid pixels in final output
-            if !mask[(y, x)] {
-                continue;
-            }
-
-            let mut sum = 0.0;
-            let mut weight_sum = 0.0;
-
-            for (i, &k_val) in kernel.iter().enumerate() {
-                let offset = i as isize - half_kernel as isize;
-                let ny = (y as isize + offset).max(0).min(height as isize - 1) as usize;
-
-                sum += input[(ny, x)] as f32 * k_val;
-                weight_sum += k_val;
-            }
-
-            output[(y, x)] = if weight_sum > 0.0 {
-                (sum / weight_sum).round() as u16
-            } else {
-                input[(y, x)]
-            };
-        }
-    }
 }
 
 #[cfg(test)]
@@ -192,27 +189,35 @@ mod tests {
     }
 
     #[test]
+    fn test_opencv_fixed_kernel() {
+        // For ksize=5, OpenCV uses fixed binomial kernel [1/16, 4/16, 6/16, 4/16, 1/16]
+        let kernel = generate_gaussian_kernel_1d(5);
+        assert_eq!(kernel, vec![0.0625, 0.25, 0.375, 0.25, 0.0625]);
+
+        // For ksize=3, OpenCV uses [1/4, 2/4, 1/4]
+        let kernel3 = generate_gaussian_kernel_1d(3);
+        assert_eq!(kernel3, vec![0.25, 0.5, 0.25]);
+    }
+
+    #[test]
     fn test_expand_mask() {
         let mut mask = Array2::from_elem((5, 5), false);
         mask[(2, 2)] = true;
 
         let expanded = expand_mask(&mask, 1);
 
-        // Center and immediate neighbors should be true
         assert!(expanded[(2, 2)]);
         assert!(expanded[(1, 2)]);
         assert!(expanded[(3, 2)]);
         assert!(expanded[(2, 1)]);
         assert!(expanded[(2, 3)]);
-
-        // Corners should still be false
         assert!(!expanded[(0, 0)]);
     }
 
     #[test]
     fn test_refine_grid() {
         let mut image = Array2::from_elem((5, 5), 100u16);
-        image[(2, 2)] = 0; // Grid pixel
+        image[(2, 2)] = 50; // Pre-initialized grid pixel (min_nonzero)
 
         let mut mask = Array2::from_elem((5, 5), false);
         mask[(2, 2)] = true;
@@ -220,9 +225,8 @@ mod tests {
         let result = refine_grid(image.view_mut(), &mask, 3, 2);
         assert!(result.is_ok());
 
-        // Grid pixel should now have a smoothed value
+        // Grid pixel should converge toward surrounding values
         let refined = image[(2, 2)];
-        assert!(refined > 0);
-        assert!(refined < 100);
+        assert!(refined > 50, "Should increase from init value: {}", refined);
     }
 }

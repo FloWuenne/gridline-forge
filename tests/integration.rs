@@ -175,7 +175,7 @@ fn test_synthetic_image_basic() {
     let config = ProcessingConfig {
         kernel_size: 5,
         refinement_rounds: 5,
-        fmm_radius: 3,
+
         show_progress: false,
         benchmark: false,
     };
@@ -234,7 +234,7 @@ fn test_auto_detection() {
     let config = ProcessingConfig {
         kernel_size: 5,
         refinement_rounds: 5,
-        fmm_radius: 3,
+
         show_progress: false,
         benchmark: false,
     };
@@ -287,7 +287,7 @@ fn test_compare_with_mindagap() {
     let config = ProcessingConfig {
         kernel_size: 5,
         refinement_rounds: 10, // Use more iterations for fair comparison
-        fmm_radius: 3,
+
         show_progress: false,
         benchmark: false,
     };

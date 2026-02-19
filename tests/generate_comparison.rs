@@ -61,7 +61,7 @@ fn main() {
     let config = ProcessingConfig {
         kernel_size: 5,
         refinement_rounds: 10,
-        fmm_radius: 3,
+
         show_progress: true,
         benchmark: true,
     };

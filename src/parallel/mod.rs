@@ -3,30 +3,50 @@
 use crate::types::{GridPattern, ProcessingConfig, Result};
 use ndarray::{Array2, ArrayViewMut2, Axis};
 
-/// Process a single layer: create mask, inpaint, and refine
+/// Process a single layer: create mask, init grid pixels, and refine via Gaussian blur
+///
+/// Matches MindaGap's algorithm:
+/// 1. Mask zero-valued pixels
+/// 2. Initialize grid pixels to min non-zero value
+/// 3. Iterative Gaussian blur (full image), copying back only grid pixels
 pub fn process_single_layer(
     mut layer: ArrayViewMut2<u16>,
-    pattern: &GridPattern,
+    _pattern: &GridPattern,
     config: &ProcessingConfig,
 ) -> Result<()> {
     let (height, width) = (layer.nrows(), layer.ncols());
 
-    // Create mask for grid pixels
+    // Create mask from actual zero-valued pixels
     let mut mask = Array2::from_elem((height, width), false);
+    let mut min_nonzero: u16 = u16::MAX;
+
     for y in 0..height {
         for x in 0..width {
-            if pattern.is_grid_pixel(x as u32, y as u32) {
+            if layer[(y, x)] == 0 {
                 mask[(y, x)] = true;
+            } else {
+                min_nonzero = min_nonzero.min(layer[(y, x)]);
             }
         }
     }
 
-    // Fast Marching Method inpainting
-    crate::inpainting::fast_marching_inpaint(layer.view_mut(), &mask, config.fmm_radius)?;
+    // Fallback if all pixels are zero
+    if min_nonzero == u16::MAX {
+        min_nonzero = 1;
+    }
 
-    // Refinement
+    // Initialize grid pixels to min non-zero value (matches MindaGap: im_copy[grid_coords] = min(img_array[img_array > 0]))
+    for y in 0..height {
+        for x in 0..width {
+            if mask[(y, x)] {
+                layer[(y, x)] = min_nonzero;
+            }
+        }
+    }
+
+    // Iterative Gaussian blur refinement
     crate::refinement::refine_grid(
-        layer.view_mut(),
+        layer,
         &mask,
         config.kernel_size,
         config.refinement_rounds,

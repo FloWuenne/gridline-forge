@@ -77,12 +77,10 @@ impl Default for DetectionConfig {
 /// Processing configuration
 #[derive(Debug, Clone)]
 pub struct ProcessingConfig {
-    /// Gaussian kernel size for refinement (must be odd)
+    /// Gaussian kernel size (must be odd, default 5)
     pub kernel_size: usize,
-    /// Number of refinement iterations
+    /// Number of Gaussian blur iterations (default 40, matching MindaGap)
     pub refinement_rounds: usize,
-    /// Radius for fast marching method
-    pub fmm_radius: usize,
     /// Show progress bars
     pub show_progress: bool,
     /// Enable detailed timing information
@@ -93,8 +91,7 @@ impl Default for ProcessingConfig {
     fn default() -> Self {
         Self {
             kernel_size: 5,
-            refinement_rounds: 5,
-            fmm_radius: 3,
+            refinement_rounds: 40,
             show_progress: true,
             benchmark: false,
         }

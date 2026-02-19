@@ -156,20 +156,27 @@ fn find_grid_offset(projection: &[f64], spacing: u32) -> u32 {
 /// Validate detected pattern against actual image pixels
 fn validate_pattern(image: &Array2<u16>, pattern: &GridPattern) -> f32 {
     let (height, width) = (image.nrows() as u32, image.ncols() as u32);
+    let gw = pattern.grid_width.max(1);
 
     // Sample grid positions and check how many are actually zero or near-zero
     let mut grid_pixels = 0;
     let mut zero_pixels = 0;
 
-    // Sample vertical lines
+    // Sample vertical lines (check any pixel within grid_width band)
     if pattern.x_spacing > 0 {
         let mut x = pattern.x_offset;
         while x < width {
             for y in (0..height).step_by(10) {
-                // Sample every 10 pixels
                 grid_pixels += 1;
-                let val = image[(y as usize, x as usize)];
-                if val == 0 {
+                let mut found_zero = false;
+                for dx in 0..gw {
+                    let xc = x + dx;
+                    if xc < width && image[(y as usize, xc as usize)] == 0 {
+                        found_zero = true;
+                        break;
+                    }
+                }
+                if found_zero {
                     zero_pixels += 1;
                 }
             }
@@ -177,15 +184,21 @@ fn validate_pattern(image: &Array2<u16>, pattern: &GridPattern) -> f32 {
         }
     }
 
-    // Sample horizontal lines
+    // Sample horizontal lines (check any pixel within grid_width band)
     if pattern.y_spacing > 0 {
         let mut y = pattern.y_offset;
         while y < height {
             for x in (0..width).step_by(10) {
-                // Sample every 10 pixels
                 grid_pixels += 1;
-                let val = image[(y as usize, x as usize)];
-                if val == 0 {
+                let mut found_zero = false;
+                for dy in 0..gw {
+                    let yc = y + dy;
+                    if yc < height && image[(yc as usize, x as usize)] == 0 {
+                        found_zero = true;
+                        break;
+                    }
+                }
+                if found_zero {
                     zero_pixels += 1;
                 }
             }
@@ -199,6 +212,28 @@ fn validate_pattern(image: &Array2<u16>, pattern: &GridPattern) -> f32 {
 
     // Confidence is the fraction of sampled grid pixels that are zero
     zero_pixels as f32 / grid_pixels as f32
+}
+
+/// Group consecutive indices into clusters, returning (start, width) for each
+fn cluster_lines(lines: &[u32]) -> Vec<(u32, u32)> {
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    let mut clusters = Vec::new();
+    let mut start = lines[0];
+    let mut end = lines[0];
+
+    for &line in &lines[1..] {
+        if line == end + 1 {
+            end = line;
+        } else {
+            clusters.push((start, end - start + 1));
+            start = line;
+            end = line;
+        }
+    }
+    clusters.push((start, end - start + 1));
+    clusters
 }
 
 /// Fallback: Direct detection of zero-valued pixels as grid
@@ -236,20 +271,43 @@ fn detect_grid_direct(image: &Array2<u16>, config: &DetectionConfig) -> Result<O
         .map(|(idx, _)| idx as u32)
         .collect();
 
-    // Compute spacing from line positions
-    let x_spacing = compute_spacing(&vertical_lines, config.min_spacing, config.max_spacing);
-    let y_spacing = compute_spacing(&horizontal_lines, config.min_spacing, config.max_spacing);
+    // Cluster consecutive zero-lines into grid line groups
+    let col_clusters = cluster_lines(&vertical_lines);
+    let row_clusters = cluster_lines(&horizontal_lines);
+
+    // Compute spacing from cluster start positions
+    let col_starts: Vec<u32> = col_clusters.iter().map(|(start, _)| *start).collect();
+    let row_starts: Vec<u32> = row_clusters.iter().map(|(start, _)| *start).collect();
+
+    let x_spacing = compute_spacing(&col_starts, config.min_spacing, config.max_spacing);
+    let y_spacing = compute_spacing(&row_starts, config.min_spacing, config.max_spacing);
 
     if x_spacing.is_none() && y_spacing.is_none() {
         return Ok(None);
     }
 
+    // Determine grid_width from the median cluster width
+    let grid_width = {
+        let all_widths: Vec<u32> = col_clusters
+            .iter()
+            .chain(row_clusters.iter())
+            .map(|(_, w)| *w)
+            .collect();
+        if all_widths.is_empty() {
+            1
+        } else {
+            let mut sorted = all_widths;
+            sorted.sort_unstable();
+            sorted[sorted.len() / 2]
+        }
+    };
+
     let pattern = GridPattern {
         x_spacing: x_spacing.unwrap_or(0),
         y_spacing: y_spacing.unwrap_or(0),
-        x_offset: vertical_lines.first().copied().unwrap_or(0),
-        y_offset: horizontal_lines.first().copied().unwrap_or(0),
-        grid_width: 1,
+        x_offset: col_starts.first().copied().unwrap_or(0),
+        y_offset: row_starts.first().copied().unwrap_or(0),
+        grid_width,
         confidence: 0.9, // High confidence for direct detection
     };
 
