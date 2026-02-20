@@ -8,6 +8,7 @@
 
 use crate::types::Result;
 use ndarray::{Array2, ArrayViewMut2};
+use rayon::prelude::*;
 
 /// Refine grid regions using MindaGap-style iterative Gaussian blur
 ///
@@ -36,69 +37,109 @@ pub fn refine_grid(
     let kernel = generate_gaussian_kernel_1d(kernel_size);
     let half_k = kernel_size / 2;
 
-    // Build flat mask for fast indexing
-    let flat_mask: Vec<bool> = (0..height)
-        .flat_map(|y| (0..width).map(move |x| mask[(y, x)]))
+    // Build flat mask — use contiguous slice if available, else indexed
+    let flat_mask: Vec<bool> = if let Some(slice) = mask.as_slice() {
+        slice.to_vec()
+    } else {
+        (0..height)
+            .flat_map(|y| (0..width).map(move |x| mask[(y, x)]))
+            .collect()
+    };
+
+    // Pre-compute grid pixel indices — grid pixels are sparse (~0.1% of image),
+    // so only computing vertical blur for these gives a massive speedup
+    let grid_indices: Vec<usize> = flat_mask
+        .iter()
+        .enumerate()
+        .filter(|(_, &m)| m)
+        .map(|(i, _)| i)
         .collect();
 
-    // Work buffer: copy image as f32
-    let mut work: Vec<f32> = Vec::with_capacity(height * width);
-    for y in 0..height {
-        for x in 0..width {
-            work.push(image[(y, x)] as f32);
+    // Work buffer: copy image as f32 using contiguous access when possible
+    let mut work: Vec<f32> = if let Some(slice) = image.as_slice() {
+        slice.iter().map(|&v| v as f32).collect()
+    } else {
+        let mut buf = Vec::with_capacity(height * width);
+        for y in 0..height {
+            for x in 0..width {
+                buf.push(image[(y, x)] as f32);
+            }
         }
-    }
+        buf
+    };
 
     // Temp buffer for horizontal pass results
     let mut temp: Vec<f32> = vec![0.0; height * width];
 
     for _ in 0..iterations {
         // Horizontal pass: blur work -> temp (all pixels)
-        for y in 0..height {
-            let row_offset = y * width;
-            for x in 0..width {
-                let mut sum = 0.0f32;
-                for (i, &k_val) in kernel.iter().enumerate() {
-                    let sx = (x as isize + i as isize - half_k as isize)
-                        .max(0)
-                        .min(width as isize - 1) as usize;
-                    sum += work[row_offset + sx] * k_val;
-                }
-                temp[row_offset + x] = sum;
-            }
-        }
+        // Split into edge/interior so the compiler can auto-vectorize the interior
+        temp.par_chunks_mut(width)
+            .enumerate()
+            .for_each(|(y, temp_row)| {
+                let row_offset = y * width;
+                let work_row = &work[row_offset..row_offset + width];
 
-        // Vertical pass: blur temp -> write to work, but only grid pixels
-        // Non-grid pixels in work stay unchanged (they are the original image values)
-        for y in 0..height {
-            let row_offset = y * width;
-            for x in 0..width {
-                if !flat_mask[row_offset + x] {
-                    continue;
+                // Left edge (clamped boundary)
+                for x in 0..half_k.min(width) {
+                    let mut sum = 0.0f32;
+                    for (i, &k_val) in kernel.iter().enumerate() {
+                        let sx = (x + i).saturating_sub(half_k).min(width - 1);
+                        sum += work_row[sx] * k_val;
+                    }
+                    temp_row[x] = sum;
                 }
 
+                // Interior (no bounds checks needed — enables SIMD auto-vectorization)
+                if width > kernel_size {
+                    for x in half_k..(width - half_k) {
+                        let mut sum = 0.0f32;
+                        let base = x - half_k;
+                        for (i, &k_val) in kernel.iter().enumerate() {
+                            sum += work_row[base + i] * k_val;
+                        }
+                        temp_row[x] = sum;
+                    }
+                }
+
+                // Right edge (clamped boundary)
+                for x in width.saturating_sub(half_k)..width {
+                    let mut sum = 0.0f32;
+                    for (i, &k_val) in kernel.iter().enumerate() {
+                        let sx = (x + i).saturating_sub(half_k).min(width - 1);
+                        sum += work_row[sx] * k_val;
+                    }
+                    temp_row[x] = sum;
+                }
+            });
+
+        // Vertical pass: only compute grid pixels (sparse — typically ~0.1% of image)
+        // Compute blurred values in parallel, then scatter back to work buffer
+        let blurred: Vec<f32> = grid_indices
+            .par_iter()
+            .map(|&idx| {
+                let y = idx / width;
+                let x = idx % width;
                 let mut sum = 0.0f32;
                 for (i, &k_val) in kernel.iter().enumerate() {
-                    let sy = (y as isize + i as isize - half_k as isize)
-                        .max(0)
-                        .min(height as isize - 1) as usize;
+                    let sy = (y + i).saturating_sub(half_k).min(height - 1);
                     sum += temp[sy * width + x] * k_val;
                 }
-                // Round to integer each iteration to match MindaGap's uint16 behavior
-                // (cv2.GaussianBlur on uint16 returns uint16, so rounding happens each iteration)
-                work[row_offset + x] = sum.round();
-            }
+                sum.round()
+            })
+            .collect();
+
+        // Scatter results back (sequential — fast for sparse grid)
+        for (i, &idx) in grid_indices.iter().enumerate() {
+            work[idx] = blurred[i];
         }
     }
 
     // Copy results back to image (grid pixels only)
-    for y in 0..height {
-        let row_offset = y * width;
-        for x in 0..width {
-            if flat_mask[row_offset + x] {
-                image[(y, x)] = work[row_offset + x].round() as u16;
-            }
-        }
+    for &idx in &grid_indices {
+        let y = idx / width;
+        let x = idx % width;
+        image[(y, x)] = work[idx] as u16;
     }
 
     Ok(())

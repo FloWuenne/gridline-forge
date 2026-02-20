@@ -14,54 +14,33 @@ pub fn load_image(path: &Path) -> Result<ImageData> {
     match img {
         DynamicImage::ImageLuma8(buf) => {
             let (width, height) = buf.dimensions();
-            let mut array = Array2::zeros((height as usize, width as usize));
-
-            for y in 0..height as usize {
-                for x in 0..width as usize {
-                    array[(y, x)] = buf.get_pixel(x as u32, y as u32)[0];
-                }
-            }
-
+            // Direct buffer access — ImageBuffer stores pixels row-major
+            let raw = buf.into_raw();
+            let array = Array2::from_shape_vec((height as usize, width as usize), raw)
+                .map_err(|e| Error::Processing(format!("Array shape error: {}", e)))?;
             Ok(ImageData::Gray8(array))
         }
         DynamicImage::ImageLuma16(buf) => {
             let (width, height) = buf.dimensions();
-            let mut array = Array2::zeros((height as usize, width as usize));
-
-            for y in 0..height as usize {
-                for x in 0..width as usize {
-                    array[(y, x)] = buf.get_pixel(x as u32, y as u32)[0];
-                }
-            }
-
+            let raw = buf.into_raw();
+            let array = Array2::from_shape_vec((height as usize, width as usize), raw)
+                .map_err(|e| Error::Processing(format!("Array shape error: {}", e)))?;
             Ok(ImageData::Gray16(array))
         }
         DynamicImage::ImageRgb8(_) | DynamicImage::ImageRgba8(_) => {
-            // Convert to grayscale
             let gray = img.to_luma8();
             let (width, height) = gray.dimensions();
-            let mut array = Array2::zeros((height as usize, width as usize));
-
-            for y in 0..height as usize {
-                for x in 0..width as usize {
-                    array[(y, x)] = gray.get_pixel(x as u32, y as u32)[0];
-                }
-            }
-
+            let raw = gray.into_raw();
+            let array = Array2::from_shape_vec((height as usize, width as usize), raw)
+                .map_err(|e| Error::Processing(format!("Array shape error: {}", e)))?;
             Ok(ImageData::Gray8(array))
         }
         DynamicImage::ImageRgb16(_) | DynamicImage::ImageRgba16(_) => {
-            // Convert to grayscale 16-bit
             let gray = img.to_luma16();
             let (width, height) = gray.dimensions();
-            let mut array = Array2::zeros((height as usize, width as usize));
-
-            for y in 0..height as usize {
-                for x in 0..width as usize {
-                    array[(y, x)] = gray.get_pixel(x as u32, y as u32)[0];
-                }
-            }
-
+            let raw = gray.into_raw();
+            let array = Array2::from_shape_vec((height as usize, width as usize), raw)
+                .map_err(|e| Error::Processing(format!("Array shape error: {}", e)))?;
             Ok(ImageData::Gray16(array))
         }
         _ => Err(Error::UnsupportedFormat(format!(
@@ -76,26 +55,25 @@ pub fn save_image(path: &Path, data: &ImageData, format: ImageFormat) -> Result<
     match data {
         ImageData::Gray8(array) => {
             let (height, width) = (array.nrows() as u32, array.ncols() as u32);
-            let mut buf = ImageBuffer::<Luma<u8>, Vec<u8>>::new(width, height);
-
-            for (y, row) in array.rows().into_iter().enumerate() {
-                for (x, &pixel) in row.iter().enumerate() {
-                    buf.put_pixel(x as u32, y as u32, Luma([pixel]));
-                }
-            }
-
+            // Direct buffer construction from contiguous array data
+            let raw = if let Some(slice) = array.as_slice() {
+                slice.to_vec()
+            } else {
+                array.iter().copied().collect()
+            };
+            let buf = ImageBuffer::<Luma<u8>, Vec<u8>>::from_raw(width, height, raw)
+                .ok_or_else(|| Error::Processing("Failed to create image buffer".to_string()))?;
             save_buffer_with_format(path, &buf, format)?;
         }
         ImageData::Gray16(array) => {
             let (height, width) = (array.nrows() as u32, array.ncols() as u32);
-            let mut buf = ImageBuffer::<Luma<u16>, Vec<u16>>::new(width, height);
-
-            for (y, row) in array.rows().into_iter().enumerate() {
-                for (x, &pixel) in row.iter().enumerate() {
-                    buf.put_pixel(x as u32, y as u32, Luma([pixel]));
-                }
-            }
-
+            let raw = if let Some(slice) = array.as_slice() {
+                slice.to_vec()
+            } else {
+                array.iter().copied().collect()
+            };
+            let buf = ImageBuffer::<Luma<u16>, Vec<u16>>::from_raw(width, height, raw)
+                .ok_or_else(|| Error::Processing("Failed to create image buffer".to_string()))?;
             save_buffer_u16(path, &buf)?;
         }
         ImageData::Multi8(_) => {

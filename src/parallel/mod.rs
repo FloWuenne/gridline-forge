@@ -2,6 +2,7 @@
 
 use crate::types::{GridPattern, ProcessingConfig, Result};
 use ndarray::{Array2, ArrayViewMut2, Axis};
+use rayon::prelude::*;
 
 /// Process a single layer: create mask, init grid pixels, and refine via Gaussian blur
 ///
@@ -16,35 +17,56 @@ pub fn process_single_layer(
 ) -> Result<()> {
     let (height, width) = (layer.nrows(), layer.ncols());
 
-    // Create mask from actual zero-valued pixels
-    let mut mask = Array2::from_elem((height, width), false);
+    // Build mask and find min_nonzero in a single pass over contiguous data
+    let mut mask_data = vec![false; height * width];
     let mut min_nonzero: u16 = u16::MAX;
 
-    for y in 0..height {
-        for x in 0..width {
-            if layer[(y, x)] == 0 {
-                mask[(y, x)] = true;
-            } else {
-                min_nonzero = min_nonzero.min(layer[(y, x)]);
+    if let Some(slice) = layer.as_slice() {
+        for (i, &val) in slice.iter().enumerate() {
+            if val == 0 {
+                mask_data[i] = true;
+            } else if val < min_nonzero {
+                min_nonzero = val;
+            }
+        }
+    } else {
+        for y in 0..height {
+            for x in 0..width {
+                let val = layer[(y, x)];
+                if val == 0 {
+                    mask_data[y * width + x] = true;
+                } else if val < min_nonzero {
+                    min_nonzero = val;
+                }
             }
         }
     }
 
-    // Fallback if all pixels are zero
     if min_nonzero == u16::MAX {
         min_nonzero = 1;
     }
 
-    // Initialize grid pixels to min non-zero value (matches MindaGap: im_copy[grid_coords] = min(img_array[img_array > 0]))
-    for y in 0..height {
-        for x in 0..width {
-            if mask[(y, x)] {
-                layer[(y, x)] = min_nonzero;
+    // Initialize grid pixels to min non-zero value
+    if let Some(slice) = layer.as_slice_mut() {
+        for (i, val) in slice.iter_mut().enumerate() {
+            if mask_data[i] {
+                *val = min_nonzero;
+            }
+        }
+    } else {
+        for y in 0..height {
+            for x in 0..width {
+                if mask_data[y * width + x] {
+                    layer[(y, x)] = min_nonzero;
+                }
             }
         }
     }
 
-    // Iterative Gaussian blur refinement
+    // Wrap mask_data as Array2 for refine_grid interface
+    let mask = Array2::from_shape_vec((height, width), mask_data)
+        .map_err(|e| crate::types::Error::Processing(format!("Mask shape error: {}", e)))?;
+
     crate::refinement::refine_grid(
         layer,
         &mask,
@@ -63,13 +85,24 @@ pub fn process_layers_parallel(
 ) -> Result<()> {
     let num_layers = layers.shape()[0];
 
-    // For now, process sequentially until we can figure out parallel mutable iteration
-    // (ndarray's mutable axis iterators don't work well with rayon)
-    for (idx, mut layer) in layers.axis_iter_mut(Axis(0)).enumerate() {
-        if config.show_progress {
-            eprintln!("Processing layer {}/{}", idx + 1, num_layers);
-        }
-        process_single_layer(layer.view_mut(), pattern, config)?;
+    // Collect mutable layer views and process in parallel
+    let results: Vec<Result<()>> = layers
+        .axis_iter_mut(Axis(0))
+        .into_iter()
+        .enumerate()
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .map(|(idx, mut layer)| {
+            if config.show_progress {
+                eprintln!("Processing layer {}/{}", idx + 1, num_layers);
+            }
+            process_single_layer(layer.view_mut(), pattern, config)
+        })
+        .collect();
+
+    // Propagate any errors
+    for result in results {
+        result?;
     }
 
     Ok(())
