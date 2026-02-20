@@ -5,6 +5,7 @@
 //! Fast Marching Method inpainting, and localized iterative refinement.
 
 pub mod detection;
+pub mod duplicate_finder;
 pub mod image_io;
 pub mod inpainting;
 pub mod parallel;

@@ -186,6 +186,9 @@ pub enum Error {
 
     #[error("Unsupported format: {0}")]
     UnsupportedFormat(String),
+
+    #[error("TSV parse error: {0}")]
+    TsvParse(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
