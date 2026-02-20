@@ -46,8 +46,7 @@ pub fn refine_grid(
             .collect()
     };
 
-    // Pre-compute grid pixel indices — grid pixels are sparse (~0.1% of image),
-    // so only computing vertical blur for these gives a massive speedup
+    // Pre-compute grid pixel indices (sparse — ~0.1% of image)
     let grid_indices: Vec<usize> = flat_mask
         .iter()
         .enumerate()
@@ -55,7 +54,14 @@ pub fn refine_grid(
         .map(|(i, _)| i)
         .collect();
 
-    // Work buffer: copy image as f32 using contiguous access when possible
+    // Pre-compute horizontal influence ranges per row.
+    // temp[y][x] depends on work[y][x-half_k..x+half_k+1]. Since only grid pixels
+    // in work change between iterations, temp[y][x] needs recomputing only if
+    // work[y] has a grid pixel within half_k columns of x.
+    // Derived from the actual mask, so any grid line width is handled automatically.
+    let h_influence_ranges = compute_influence_ranges(&flat_mask, height, width, half_k);
+
+    // Work buffer: copy image as f32
     let mut work: Vec<f32> = if let Some(slice) = image.as_slice() {
         slice.iter().map(|&v| v as f32).collect()
     } else {
@@ -71,53 +77,20 @@ pub fn refine_grid(
     // Temp buffer for horizontal pass results
     let mut temp: Vec<f32> = vec![0.0; height * width];
 
-    for _ in 0..iterations {
-        // Horizontal pass: blur work -> temp (all pixels)
-        // Split into edge/interior so the compiler can auto-vectorize the interior
-        temp.par_chunks_mut(width)
-            .enumerate()
-            .for_each(|(y, temp_row)| {
-                let row_offset = y * width;
-                let work_row = &work[row_offset..row_offset + width];
+    // Pre-allocated buffer for vertical pass results (avoids allocation per iteration)
+    let mut blurred = vec![0.0f32; grid_indices.len()];
 
-                // Left edge (clamped boundary)
-                for x in 0..half_k.min(width) {
-                    let mut sum = 0.0f32;
-                    for (i, &k_val) in kernel.iter().enumerate() {
-                        let sx = (x + i).saturating_sub(half_k).min(width - 1);
-                        sum += work_row[sx] * k_val;
-                    }
-                    temp_row[x] = sum;
-                }
+    // Initial full horizontal blur — computes temp for ALL positions.
+    // "Static" positions (not influenced by grid pixels) won't change in subsequent
+    // iterations, so this one-time computation remains valid throughout the loop.
+    horizontal_blur_full(&work, &mut temp, width, &kernel, half_k);
 
-                // Interior (no bounds checks needed — enables SIMD auto-vectorization)
-                if width > kernel_size {
-                    for x in half_k..(width - half_k) {
-                        let mut sum = 0.0f32;
-                        let base = x - half_k;
-                        for (i, &k_val) in kernel.iter().enumerate() {
-                            sum += work_row[base + i] * k_val;
-                        }
-                        temp_row[x] = sum;
-                    }
-                }
-
-                // Right edge (clamped boundary)
-                for x in width.saturating_sub(half_k)..width {
-                    let mut sum = 0.0f32;
-                    for (i, &k_val) in kernel.iter().enumerate() {
-                        let sx = (x + i).saturating_sub(half_k).min(width - 1);
-                        sum += work_row[sx] * k_val;
-                    }
-                    temp_row[x] = sum;
-                }
-            });
-
-        // Vertical pass: only compute grid pixels (sparse — typically ~0.1% of image)
-        // Compute blurred values in parallel, then scatter back to work buffer
-        let blurred: Vec<f32> = grid_indices
+    for iter in 0..iterations {
+        // Vertical pass: compute blur only at grid pixel positions
+        grid_indices
             .par_iter()
-            .map(|&idx| {
+            .zip(blurred.par_iter_mut())
+            .for_each(|(&idx, out)| {
                 let y = idx / width;
                 let x = idx % width;
                 let mut sum = 0.0f32;
@@ -125,13 +98,27 @@ pub fn refine_grid(
                     let sy = (y + i).saturating_sub(half_k).min(height - 1);
                     sum += temp[sy * width + x] * k_val;
                 }
-                sum.round()
-            })
-            .collect();
+                // Round to integer each iteration to match MindaGap's uint16 behavior
+                *out = sum.round();
+            });
 
-        // Scatter results back (sequential — fast for sparse grid)
+        // Scatter blurred values to work at grid pixel positions
         for (i, &idx) in grid_indices.iter().enumerate() {
             work[idx] = blurred[i];
+        }
+
+        // Selective horizontal pass: only recompute temp at positions whose
+        // work inputs changed (positions near grid pixels in each row).
+        // Skip on the last iteration — temp won't be read again.
+        if iter < iterations - 1 {
+            horizontal_blur_selective(
+                &work,
+                &mut temp,
+                width,
+                &kernel,
+                half_k,
+                &h_influence_ranges,
+            );
         }
     }
 
@@ -143,6 +130,144 @@ pub fn refine_grid(
     }
 
     Ok(())
+}
+
+/// Full horizontal blur: work -> temp for all pixels.
+/// Uses edge/interior split to enable SIMD auto-vectorization in the interior.
+fn horizontal_blur_full(
+    work: &[f32],
+    temp: &mut [f32],
+    width: usize,
+    kernel: &[f32],
+    half_k: usize,
+) {
+    let kernel_size = kernel.len();
+    temp.par_chunks_mut(width)
+        .enumerate()
+        .for_each(|(y, temp_row)| {
+            let row_offset = y * width;
+            let work_row = &work[row_offset..row_offset + width];
+
+            // Left edge (clamped boundary)
+            for x in 0..half_k.min(width) {
+                let mut sum = 0.0f32;
+                for (i, &k_val) in kernel.iter().enumerate() {
+                    let sx = (x + i).saturating_sub(half_k).min(width - 1);
+                    sum += work_row[sx] * k_val;
+                }
+                temp_row[x] = sum;
+            }
+
+            // Interior (no bounds checks — enables SIMD auto-vectorization)
+            if width > kernel_size {
+                for x in half_k..(width - half_k) {
+                    let mut sum = 0.0f32;
+                    let base = x - half_k;
+                    for (i, &k_val) in kernel.iter().enumerate() {
+                        sum += work_row[base + i] * k_val;
+                    }
+                    temp_row[x] = sum;
+                }
+            }
+
+            // Right edge (clamped boundary)
+            for x in width.saturating_sub(half_k)..width {
+                let mut sum = 0.0f32;
+                for (i, &k_val) in kernel.iter().enumerate() {
+                    let sx = (x + i).saturating_sub(half_k).min(width - 1);
+                    sum += work_row[sx] * k_val;
+                }
+                temp_row[x] = sum;
+            }
+        });
+    // Sync point: par_chunks_mut guarantees all rows are complete before returning.
+    // This ensures temp is fully populated and the correctness invariant holds:
+    // for rows with no influence ranges (no grid pixels nearby), these temp values
+    // are now "static" — they depend only on non-grid work values which never change,
+    // so they remain valid for all subsequent iterations without recomputation.
+}
+
+/// Selective horizontal blur: only recompute temp at column ranges that are
+/// influenced by grid pixels. Each row's ranges were pre-computed from the mask.
+fn horizontal_blur_selective(
+    work: &[f32],
+    temp: &mut [f32],
+    width: usize,
+    kernel: &[f32],
+    half_k: usize,
+    influence_ranges: &[Vec<(usize, usize)>],
+) {
+    temp.par_chunks_mut(width)
+        .zip(influence_ranges.par_iter())
+        .enumerate()
+        .for_each(|(y, (temp_row, ranges))| {
+            if ranges.is_empty() {
+                return;
+            }
+            let row_offset = y * width;
+            let work_row = &work[row_offset..row_offset + width];
+
+            for &(start, end) in ranges.iter() {
+                for x in start..end {
+                    let mut sum = 0.0f32;
+                    for (i, &k_val) in kernel.iter().enumerate() {
+                        let sx = (x + i).saturating_sub(half_k).min(width - 1);
+                        sum += work_row[sx] * k_val;
+                    }
+                    temp_row[x] = sum;
+                }
+            }
+        });
+}
+
+/// Compute per-row column ranges that need horizontal blur recomputation.
+///
+/// A column x in row y is "influenced" if any grid pixel exists within
+/// half_k columns of x in the same row. This is equivalent to horizontally
+/// dilating the mask by half_k. Adjacent/overlapping ranges are merged.
+///
+/// Derived from the actual zero-pixel mask, so any grid line width is
+/// handled automatically — wider grid lines simply produce wider ranges.
+fn compute_influence_ranges(
+    flat_mask: &[bool],
+    height: usize,
+    width: usize,
+    half_k: usize,
+) -> Vec<Vec<(usize, usize)>> {
+    (0..height)
+        .map(|y| {
+            let row_offset = y * width;
+            let mut ranges: Vec<(usize, usize)> = Vec::new();
+            let mut x = 0;
+            while x < width {
+                if flat_mask[row_offset + x] {
+                    // Found a grid pixel — expand influence by half_k in both directions
+                    let start = x.saturating_sub(half_k);
+                    // Skip consecutive grid pixels (handles grid_width > 1)
+                    let mut end_grid = x;
+                    while end_grid + 1 < width && flat_mask[row_offset + end_grid + 1] {
+                        end_grid += 1;
+                    }
+                    let end = (end_grid + half_k + 1).min(width);
+
+                    // Merge with previous range if overlapping
+                    if let Some(last) = ranges.last_mut() {
+                        if start <= last.1 {
+                            last.1 = last.1.max(end);
+                        } else {
+                            ranges.push((start, end));
+                        }
+                    } else {
+                        ranges.push((start, end));
+                    }
+                    x = end_grid + 1;
+                } else {
+                    x += 1;
+                }
+            }
+            ranges
+        })
+        .collect()
 }
 
 /// Generate 1D Gaussian kernel matching OpenCV's getGaussianKernel behavior
